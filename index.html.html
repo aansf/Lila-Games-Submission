@@ -223,6 +223,11 @@
   .verdict .build b{color:var(--echo)}
   .verdict .thread{margin-top:14px;font-style:italic;color:var(--text);font-size:14px;opacity:.9}
 
+  .arena-unlock{border-radius:16px;padding:16px 18px;text-align:center;margin-bottom:18px;
+    background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.5)}
+  .arena-unlock .au-line{font-style:italic;color:var(--text);font-size:14px;opacity:.92}
+  .arena-unlock .au-unlock{font-family:"Space Mono";font-size:12px;letter-spacing:2px;color:var(--echo);margin-top:9px;font-weight:700}
+
   /* meta shop */
   .shop{border-top:1px solid var(--line);padding-top:20px;margin-top:4px}
   .shop-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px}
@@ -388,6 +393,7 @@
         <div class="build" id="verdictBuild"></div>
         <div class="thread" id="verdictThread"></div>
       </div>
+      <div id="arenaUnlock" class="arena-unlock" style="display:none"></div>
       <div class="shop">
         <div class="shop-head"><div class="t">PERMANENT UPGRADES</div><div class="bank">◈ <span id="shopBank">0</span></div></div>
         <div class="shop-items" id="shopItems"></div>
@@ -446,8 +452,8 @@
 "use strict";
 
 /* ---------- persistence (in-memory truth + optional cross-session) ---------- */
-let persist = { coins:0, runNumber:1, meta:{vitality:0,power:0,haste:0}, lastRun:null, history:[] };
-const SAVE_KEY = "echo_run_save_v1";
+let persist = { coins:0, runNumber:1, meta:{vitality:0,power:0,haste:0}, lastRun:null, history:[], arenaUnlocked:false, expandArena:false };
+const SAVE_KEY = "echo_run_save_v2";
 async function loadPersist(){
   try{
     if (window.storage && typeof window.storage.get === "function"){
@@ -488,7 +494,7 @@ const el = {
   endResult:$("endResult"), goodDots:$("goodDots"), badDots:$("badDots"),
   verdict:$("verdict"), verdictTag:$("verdictTag"), verdictTitle:$("verdictTitle"),
   verdictBuild:$("verdictBuild"), verdictThread:$("verdictThread"),
-  shopItems:$("shopItems"), shopBank:$("shopBank"),
+  shopItems:$("shopItems"), shopBank:$("shopBank"), arenaUnlock:$("arenaUnlock"),
   continueBtn:$("continueBtn"), titleBtn:$("titleBtn"),
   historyScreen:$("historyScreen"), historyList:$("historyList"), historyBackBtn:$("historyBackBtn"),
   statsScreen:$("statsScreen"), statsList:$("statsList"), statsBackBtn:$("statsBackBtn"),
@@ -497,8 +503,38 @@ const el = {
 };
 
 /* ---------- three.js setup ---------- */
-const ARENA = 32;            // half-extent of the floor
-const CLAMP = ARENA - 1.2;
+const ARENA_BASE = 32;       // base half-extent of the floor
+let ARENA = ARENA_BASE;      // current half-extent (grows with the Expand Arena upgrade)
+let CLAMP = ARENA - 1.2;
+let arenaMeshes = [];        // floor / grid / walls, rebuilt when the arena grows
+let arenaBuiltAt = -1;
+function applyArenaUpgrade(){            // +20% AREA -> ~+9.5% per side (sqrt of 1.2)
+  ARENA = ARENA_BASE * (persist.expandArena ? Math.sqrt(1.2) : 1);
+  CLAMP = ARENA - 1.2;
+}
+function buildArena(){
+  if (arenaBuiltAt === ARENA) return;   // only rebuild when the size actually changed
+  arenaBuiltAt = ARENA;
+  for (const m of arenaMeshes){ scene.remove(m); if (m.geometry) m.geometry.dispose(); }
+  arenaMeshes = [];
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(ARENA*2, ARENA*2),
+    new THREE.MeshStandardMaterial({ color:0x0d0d1e, roughness:1, metalness:0 })
+  );
+  floor.rotation.x = -Math.PI/2; scene.add(floor); arenaMeshes.push(floor);
+  const grid = new THREE.GridHelper(ARENA*2, 32, 0x2a2748, 0x18162e);
+  grid.position.y = 0.02; scene.add(grid); arenaMeshes.push(grid);
+  const wallMat = new THREE.MeshStandardMaterial({ color:0x16142c, emissive:0x2a2452, emissiveIntensity:0.4, roughness:0.6 });
+  const wt = 1.2, h = 2.2;
+  const walls = [
+    [0, ARENA, ARENA*2+wt, wt], [0,-ARENA, ARENA*2+wt, wt],
+    [ARENA,0, wt, ARENA*2+wt], [-ARENA,0, wt, ARENA*2+wt],
+  ];
+  for (const [x,z,w,d] of walls){
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), wallMat);
+    m.position.set(x,h/2,z); scene.add(m); arenaMeshes.push(m);
+  }
+}
 let scene, camera, renderer, clock;
 const camOffset = new THREE.Vector3(0, 24, 15);
 
@@ -520,26 +556,9 @@ function initThree(){
   const hemi = new THREE.HemisphereLight(0x9090ff, 0x101020, 0.6); scene.add(hemi);
   const dir = new THREE.DirectionalLight(0xffffff, 0.5); dir.position.set(10,30,12); scene.add(dir);
 
-  // floor
-  const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(ARENA*2, ARENA*2),
-    new THREE.MeshStandardMaterial({ color:0x0d0d1e, roughness:1, metalness:0 })
-  );
-  floor.rotation.x = -Math.PI/2; scene.add(floor);
-  const grid = new THREE.GridHelper(ARENA*2, 32, 0x2a2748, 0x18162e);
-  grid.position.y = 0.02; scene.add(grid);
-
-  // walls
-  const wallMat = new THREE.MeshStandardMaterial({ color:0x16142c, emissive:0x2a2452, emissiveIntensity:0.4, roughness:0.6 });
-  const wt = 1.2, h = 2.2;
-  const walls = [
-    [0, ARENA, ARENA*2+wt, wt], [0,-ARENA, ARENA*2+wt, wt],
-    [ARENA,0, wt, ARENA*2+wt], [-ARENA,0, wt, ARENA*2+wt],
-  ];
-  for (const [x,z,w,d] of walls){
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), wallMat);
-    m.position.set(x,h/2,z); scene.add(m);
-  }
+  // floor / grid / walls — built by buildArena so the Expand Arena upgrade can enlarge them
+  applyArenaUpgrade();
+  buildArena();
 
   clock = new THREE.Clock();
   addEventListener("resize", ()=>{
@@ -680,6 +699,7 @@ function baseStats(){
 function startRun(){
   hideAll();
   clearArrays();
+  applyArenaUpgrade(); buildArena();   // reflect the Expand Arena upgrade for this run
   // wipe any leftover entities from the previous run so an old echo/ally never lingers
   if (run){
     if (run.enemyEcho && run.enemyEcho.mesh) scene.remove(run.enemyEcho.mesh);
@@ -1145,6 +1165,9 @@ function runComplete(survived){
     date: Date.now(),
   });
   if (persist.history.length > 60) persist.history.length = 60;
+  // Expand Arena unlocks the first time you DIE at Dungeon 10 or deeper
+  let justUnlockedArena = false;
+  if (!survived && run.dungeon >= 10 && !persist.arenaUnlocked){ persist.arenaUnlocked = true; justUnlockedArena = true; }
   persist.coins += run.coins;
   persist.runNumber += 1;
   savePersist();
@@ -1167,6 +1190,12 @@ function runComplete(survived){
     el.verdictTitle.textContent = "Your ghost returns as an ENEMY";
     el.verdictBuild.innerHTML = "You chose power. It will come hunting, carrying:<br><b>"+names+"</b>";
     el.verdictThread.textContent = "“You chose power. It will come looking.”";
+  }
+  if (justUnlockedArena){
+    el.arenaUnlock.style.display = "block";
+    el.arenaUnlock.innerHTML = '<div class="au-line">“The battlefield was too small for what you created.”</div><div class="au-unlock">EXPANDED ARENA UNLOCKED</div>';
+  } else {
+    el.arenaUnlock.style.display = "none";
   }
   buildShop();
   el.endScreen.classList.add("show");
@@ -1195,6 +1224,25 @@ function buildShop(){
       const c = shopCost(item);
       if (persist.coins >= c){ persist.coins -= c; persist.meta[item.id]++; savePersist(); buildShop(); }
     };
+    el.shopItems.appendChild(row);
+  }
+  // One-time permanent: Expand Arena — visible only after a first death at Dungeon 10+
+  if (persist.arenaUnlocked){
+    const owned = !!persist.expandArena, cost = 2000;
+    const can = !owned && persist.coins >= cost;
+    const row = document.createElement("div"); row.className = "shop-item";
+    row.innerHTML =
+      '<div class="si-ic">🗺️</div>'+
+      '<div class="si-body"><div class="si-name">Expand Arena <span class="si-lv">'+(owned?"OWNED":"one-time")+'</span></div>'+
+      '<div class="si-lv">+20% battlefield area · more room to survive</div></div>'+
+      '<button '+((owned||!can)?"disabled":"")+'>'+(owned?"✓ OWNED":"◈ "+cost)+'</button>';
+    if (!owned){
+      row.querySelector("button").onclick = ()=>{
+        if (persist.coins >= cost && !persist.expandArena){
+          persist.coins -= cost; persist.expandArena = true; applyArenaUpgrade(); savePersist(); buildShop();
+        }
+      };
+    }
     el.shopItems.appendChild(row);
   }
 }
